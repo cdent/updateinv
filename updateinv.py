@@ -2,25 +2,29 @@
 
 An example of calling is:
 
-    df -BG --output=size / |tail -1  | python updateinv.py myrp4 DISK_GB 2
+    df -BG --output=size / |tail -1  | \
+        python updateinv.py -r myrp4 -c DISK_GB --reserved 2
 
 This reports the size (in GB) of the device hosting / to the resource
 provider 'myrp4' with a reserved of 2 GB.
 
 Note: This does an update of a single class of inventory not a set of
 all the inventory associated with one resource provider. This is because
-doign that is more aligned with the information gather processes: pipe df
-to the script with certain args to do disk capacity. We'd pipe something
-else to the script with different args to do some other kind of capacity.
+doign just one is more aligned with the information gathering processes:
+pipe df to the script with certain args to do disk capacity. We'd pipe
+something else to the script with different args to do some other kind
+of capacity, perhaps with a different set of filters in the pipeline.
 
 For the time being this does not deal with generation conflicts. If a
-409 happens, the way to fix that right now is just run the script again.
-There's an option to restart the script internal to itself instead but
-that's not implemented here.
+409 happens, the way to fix that right now is to run the script again.
+
+If there are other errors they will be reported to the console and the
+process exit code will be non-zero.
 """
 
 from __future__ import print_function
 
+import argparse
 import os
 import string
 import sys
@@ -32,6 +36,8 @@ import requests
 # export TOKEN=$(openstack token issue -f value -c id)
 # export PLACEMENT_API=$(openstack endpoint show placement \
 #                        -f value -c publicurl)
+# NOTE(cdent): We could replace all this with keystoneauth but meh;
+# the point here is to demonstrate a form of low overhead scripting.
 TOKEN = os.environ['TOKEN']
 PLACEMENT_BASE = os.environ['PLACEMENT_API']
 
@@ -64,7 +70,6 @@ def create_inventory(resource_provider, resource_class, total, reserved):
     resp = SESSION.post(url, json=data)
     if resp.status_code != 200:
         resp.raise_for_status()
-    print(resp.json())
 
 
 def get_resource_provider(resource_name):
@@ -103,24 +108,44 @@ def update_inventory(resource_provider, inventory, resource_class,
     resp = SESSION.put(url, json=inventory)
     if resp.status_code != 200:
         resp.raise_for_status()
-    print(resp.json())
+
+
+def run():
+    parser = argparse.ArgumentParser(
+        description='Update resource provider inventory from stdin')
+    parser.add_argument(
+        '-r', '--resource_provider',
+        dest='resource_provider_name',
+        required=True,
+        help='The name of the resource providing with the inventory being '
+             'updated')
+    parser.add_argument(
+        '-c', '--resource_class',
+        dest='resource_class',
+        required=True,
+        help='The resource class of the inventory being updated')
+    parser.add_argument(
+        '--reserved',
+        dest='reserved', default=0, type=int,
+        help='The amount of inventory to reserve')
+    args = parser.parse_args()
+
+    total = _read_stdin_for_total()
+    resource_provider = get_resource_provider(args.resource_provider_name)
+    inventory = get_inventory(resource_provider['uuid'], args.resource_class)
+    if inventory is None:
+        print('Creating inventory for %s, total: %s, reserved: %s' %
+              (args.resource_class, total, args.reserved))
+        create_inventory(resource_provider, args.resource_class, total,
+                         args.reserved)
+    elif inventory['total'] != total or inventory['reserved'] != args.reserved:
+        print('Updating inventory for %s, total: %s, reserved: %s' %
+              (args.resource_class, total, args.reserved))
+        update_inventory(resource_provider, inventory, args.resource_class,
+                         total, args.reserved)
+    else:
+        print('No updates required for %s' % args.resource_class)
 
 
 if __name__ == '__main__':
-    resource_name = sys.argv[1]
-    resource_class = sys.argv[2]
-    reserved = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-    total = _read_stdin_for_total()
-    resource_provider = get_resource_provider(resource_name)
-    inventory = get_inventory(resource_provider['uuid'], resource_class)
-    if inventory is None:
-        print('Creating inventory for %s, total: %s, reserved: %s' %
-              (resource_class, total, reserved))
-        create_inventory(resource_provider, resource_class, total, reserved)
-    elif inventory['total'] != total or inventory['reserved'] != reserved:
-        print('Updating inventory for %s, total: %s, reserved: %s' %
-              (resource_class, total, reserved))
-        update_inventory(resource_provider, inventory, resource_class,
-                         total, reserved)
-    else:
-        print('No updates required for %s' % resource_class)
+    run()
